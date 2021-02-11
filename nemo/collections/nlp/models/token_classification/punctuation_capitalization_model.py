@@ -20,11 +20,8 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning import Trainer
 
+from tqdm import tqdm
 from nemo.collections.common.losses import AggregatorLoss, CrossEntropyLoss
-from nemo.collections.nlp.data.token_classification.punctuation_capitalization_dataset import (
-    BertPunctuationCapitalizationDataset,
-    BertPunctuationCapitalizationInferDataset,
-)
 from nemo.collections.nlp.metrics.classification_report import ClassificationReport
 from nemo.collections.nlp.models.nlp_model import NLPModel
 from nemo.collections.nlp.modules.common import TokenClassifier
@@ -34,7 +31,9 @@ from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.classes.exportable import Exportable, ExportFormat
 from nemo.core.neural_types import LogitsType, NeuralType
 from nemo.utils import logging
-from nemo.utils.export_utils import attach_onnx_to_onnx
+from nemo.collections.nlp.data.token_classification.punctuation_capitalization_dataset_mp import BertPunctuationCapitalizationDataset
+from nemo.collections.nlp.data.token_classification.punctuation_capitalization_dataset import BertPunctuationCapitalizationInferDataset
+from nemo.utils.export_utils import attach_onnx_to_onnx_2, attach_onnx_to_onnx
 
 __all__ = ['PunctuationCapitalizationModel']
 
@@ -393,7 +392,7 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
             all_punct_preds = []
             all_capit_preds = []
 
-            for batch in infer_datalayer:
+            for i, batch in tqdm(enumerate(infer_datalayer), total=len(infer_datalayer), desc="infer queries"):
                 input_ids, input_type_ids, input_mask, subtokens_mask = batch
 
                 punct_logits, capit_logits = self.forward(
@@ -419,9 +418,9 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
 
             start_idx = 0
             end_idx = 0
+            pad_label = self._cfg.dataset.pad_label
             for query in queries:
                 end_idx += len(query)
-
                 # extract predictions for the current query from the list of all predictions
                 punct_preds = all_punct_preds[start_idx:end_idx]
                 capit_preds = all_capit_preds[start_idx:end_idx]
@@ -432,10 +431,10 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
                     punct_label = punct_ids_to_labels[punct_preds[j]]
                     capit_label = capit_ids_to_labels[capit_preds[j]]
 
-                    if capit_label != self._cfg.dataset.pad_label:
+                    if capit_label != pad_label:
                         word = word.capitalize()
                     query_with_punct_and_capit += word
-                    if punct_label != self._cfg.dataset.pad_label:
+                    if punct_label != pad_label:
                         query_with_punct_and_capit += punct_label
                     query_with_punct_and_capit += ' '
 
@@ -482,3 +481,72 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
         self.bert_model._prepare_for_export()
         self.punct_classifier._prepare_for_export()
         self.capit_classifier._prepare_for_export()
+
+    def export(
+        self,
+        output: str,
+        input_example=None,
+        output_example=None,
+        verbose=False,
+        export_params=True,
+        do_constant_folding=True,
+        keep_initializers_as_inputs=False,
+        onnx_opset_version: int = 12,
+        try_script: bool = False,
+        set_eval: bool = True,
+        check_trace: bool = True,
+        use_dynamic_axes: bool = True,
+    ):
+        if input_example is not None or output_example is not None:
+            logging.warning(
+                "Passed input and output examples will be ignored and recomputed since"
+                " TextClassificationModel consists of two separate models with different"
+                " inputs and outputs."
+            )
+        bert_model_onnx = self.bert_model.export(
+            os.path.join(os.path.dirname(output), 'bert_' + os.path.basename(output)),
+            None,  # computed by input_example()
+            None,
+            verbose,
+            export_params,
+            do_constant_folding,
+            keep_initializers_as_inputs,
+            onnx_opset_version,
+            try_script,
+            set_eval,
+            check_trace,
+            use_dynamic_axes,
+        )
+
+        classifier_punct_onnx = self.punct_classifier.export(
+            os.path.join(os.path.dirname(output), 'classifier1_' + os.path.basename(output)),
+            None,  # computed by input_example()
+            None,
+            verbose,
+            export_params,
+            do_constant_folding,
+            keep_initializers_as_inputs,
+            onnx_opset_version,
+            try_script,
+            set_eval,
+            check_trace,
+            use_dynamic_axes,
+        )
+
+        classifier_capit_onnx = self.capit_classifier.export(
+            os.path.join(os.path.dirname(output), 'classifier2_' + os.path.basename(output)),
+            None,  # computed by input_example()
+            None,
+            verbose,
+            export_params,
+            do_constant_folding,
+            keep_initializers_as_inputs,
+            onnx_opset_version,
+            try_script,
+            set_eval,
+            check_trace,
+            use_dynamic_axes,
+        )
+
+        output_model = attach_onnx_to_onnx_2(bert_model_onnx, classifier_punct_onnx, classifier_capit_onnx , "CL1_", "CL2_")
+        onnx.save(output_model, output)

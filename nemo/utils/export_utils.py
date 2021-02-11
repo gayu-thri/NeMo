@@ -266,3 +266,98 @@ def attach_onnx_to_onnx(model1: onnx.ModelProto, model2: onnx.ModelProto, prefix
     output_model = onnx.helper.make_model(graph, opset_imports=model1.opset_import)
     onnx.checker.check_model(output_model, full_check=True)
     return output_model
+
+def attach_onnx_to_onnx_2(model1: onnx.ModelProto, model2: onnx.ModelProto, model3: onnx.ModelProto, prefix2: str, prefix3: str):
+
+    if len(model1.graph.output) < 1 or (len(model1.graph.output) != len(model2.graph.input)) or (len(model1.graph.output) != len(model3.graph.input)):
+        raise ValueError(
+            'Incompatible input/output dimensions: {} != {} or {}'.format(len(model1.graph.output), len(model2.graph.input), len(model3.graph.input))
+        )
+    for i in range(len(model2.graph.initializer)):
+        model2.graph.initializer[i].name = prefix2 + model2.graph.initializer[i].name
+    for i in range(len(model2.graph.node)):
+        model2.graph.node[i].name = prefix2 + model2.graph.node[i].name
+
+    for i in range(len(model3.graph.initializer)):
+        model3.graph.initializer[i].name = prefix3 + model3.graph.initializer[i].name
+    for i in range(len(model3.graph.node)):
+        model3.graph.node[i].name = prefix3 + model3.graph.node[i].name
+
+    for o in range(len(model1.graph.output)):
+        for i in range(len(model2.graph.node)):
+            for j in range(len(model2.graph.node[i].input)):
+                if model2.graph.node[i].input[j] == model2.graph.input[o].name:
+                    model2.graph.node[i].input[j] = model1.graph.output[o].name
+                else:
+                    model2.graph.node[i].input[j] = prefix2 + model2.graph.node[i].input[j]
+            for j in range(len(model2.graph.node[i].output)):
+                if model2.graph.node[i].output[j] != model2.graph.output[o].name:
+                    model2.graph.node[i].output[j] = prefix2 + model2.graph.node[i].output[j]
+                else:
+                    model2.graph.output[o].name = prefix2 + model2.graph.output[o].name
+                    model2.graph.node[i].output[j] = model2.graph.output[o].name
+
+    for o in range(len(model1.graph.output)):
+        for i in range(len(model3.graph.node)):
+            for j in range(len(model3.graph.node[i].input)):
+                if model3.graph.node[i].input[j] == model3.graph.input[o].name:
+                    model3.graph.node[i].input[j] = model1.graph.output[o].name
+                else:
+                    model3.graph.node[i].input[j] = prefix3 + model3.graph.node[i].input[j]
+            for j in range(len(model3.graph.node[i].output)):
+                if model3.graph.node[i].output[j] != model3.graph.output[o].name:
+                    model3.graph.node[i].output[j] = prefix3 + model3.graph.node[i].output[j]
+                else:
+                    model3.graph.output[o].name = prefix3 + model3.graph.output[o].name
+                    model3.graph.node[i].output[j] = model3.graph.output[o].name
+
+    # for i in range(len(model2.graph.node)):
+    #     for j in range(len(model2.graph.node[i].input)):
+    #         for o in range(len(model1.graph.output)):
+    #             if model2.graph.node[i].input[j] == model2.graph.input[o].name:
+    #                 model2.graph.node[i].input[j] = model1.graph.output[o].name
+    #             else:
+    #                 model2.graph.node[i].input[j] = prefix2 + model2.graph.node[i].input[j]
+    #     for j in range(len(model2.graph.node[i].output)):
+    #         inner_output = True
+    #         for p in range(len(model2.graph.output)):
+    #             if model2.graph.node[i].output[j] == model2.graph.output[p].name:
+    #                 inner_output = False
+    #                 break
+    #         if inner_output:
+    #             model2.graph.node[i].output[j] = prefix2 + model2.graph.node[i].output[j]
+
+    # for i in range(len(model3.graph.node)):
+    #     for j in range(len(model3.graph.node[i].input)):
+    #         for o in range(len(model1.graph.output)):
+    #             if model3.graph.node[i].input[j] == model3.graph.input[o].name:
+    #                 model3.graph.node[i].input[j] = model1.graph.output[o].name
+    #             else:
+    #                 model3.graph.node[i].input[j] = prefix3 + model3.graph.node[i].input[j]
+    #     for j in range(len(model3.graph.node[i].output)):
+    #         inner_output = True
+    #         for p in range(len(model3.graph.output)):
+    #             if model3.graph.node[i].output[j] == model3.graph.output[p].name:
+    #                 inner_output = False
+    #                 break
+    #         if inner_output:
+    #             model3.graph.node[i].output[j] = prefix3 + model3.graph.node[i].output[j]
+
+    graph = onnx.GraphProto()
+    graph.node.extend(model1.graph.node)
+    graph.node.extend(model2.graph.node)
+    graph.node.extend(model3.graph.node)
+    graph.name = model1.graph.name + " + " + model2.graph.name + " + " + model3.graph.name   # torch-jit-export + torch-jit-export + torch-jit-export
+    graph.input.extend(model1.graph.input)
+    graph.output.extend(model2.graph.output)
+    graph.output.extend(model3.graph.output)
+    graph.initializer.extend(model1.graph.initializer)
+    graph.initializer.extend(model2.graph.initializer)
+    graph.initializer.extend(model3.graph.initializer)
+    graph.value_info.extend(model2.graph.value_info)
+    graph.value_info.extend(model3.graph.value_info)
+    if model1.graph.doc_string:
+        graph.doc_string = model1.graph.doc_string
+    output_model = onnx.helper.make_model(graph, opset_imports=model1.opset_import)
+    onnx.checker.check_model(output_model, full_check=True)
+    return output_model

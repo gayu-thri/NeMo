@@ -547,6 +547,5 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
             check_trace,
             use_dynamic_axes,
         )
-
-        output_model = attach_onnx_to_onnx_2(bert_model_onnx, classifier_punct_onnx, classifier_capit_onnx , "CL1_", "CL2_")
+        output_model = attach_onnx_to_onnx_2(onnx.load(bert_model_onnx[0][0]), onnx.load(classifier_punct_onnx[0][0]), onnx.load(classifier_capit_onnx[0][0]), "CL1_", "CL2_")
         onnx.save(output_model, output)

@@ -16,14 +16,16 @@ import os
 import subprocess
 import sys
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import copy, move
 from typing import Any, Dict, List, Optional, Union
 
+import torch
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import get_original_cwd
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import LoggerCollection as _LoggerCollection
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
@@ -58,7 +60,9 @@ class CheckpointMisconfigurationError(NeMoBaseException):
 
 @dataclass
 class CallbackParams:
-    filepath: Optional[str] = None  # If None, exp_manager will attempt to handle the filepath
+    filepath: Optional[str] = None  # Deprecated
+    dirpath: Optional[str] = None  # If None, exp_manager will attempt to handle the filepath
+    filename: Optional[str] = None  # If None, exp_manager will attempt to handle the filepath
     monitor: Optional[str] = "val_loss"
     verbose: Optional[bool] = True
     save_last: Optional[bool] = True
@@ -69,6 +73,7 @@ class CallbackParams:
     prefix: Optional[str] = None  # If None, exp_manager will attempt to handle the filepath
     postfix: str = ".nemo"
     save_best_model: bool = False
+    always_save_nemo: bool = False
 
 
 @dataclass
@@ -100,13 +105,14 @@ def exp_manager(trainer: 'pytorch_lightning.Trainer', cfg: Optional[Union[DictCo
     of exp_dir/model_or_experiment_name/version. If the lightning trainer has a logger, exp_manager will get exp_dir,
     name, and version from the logger. Otherwise it will use the exp_dir and name arguments to create the logging
     directory. exp_manager also allows for explicit folder creation via explicit_log_dir.
-    The version will be a datetime string or an integer. Note, exp_manager does not handle versioning on slurm
-    multi-node runs. Datestime version can be disabled if use_datetime_version is set to False.
-    It optionally creates TensorBoardLogger, WandBLogger, ModelCheckpoint objects from pytorch lightning. It copies
-    sys.argv, and git information if available to the logging directory. It creates a log file for each process to log
-    their output into.
-    exp_manager additionally has a resume feature which can be used to continuing training from the constructed log_dir.
-
+    The version can be a datetime string or an integer. Datestime version can be disabled if use_datetime_version is set
+     to False. It optionally creates TensorBoardLogger, WandBLogger, ModelCheckpoint objects from pytorch lightning.
+    It copies sys.argv, and git information if available to the logging directory. It creates a log file for each
+    process to log their output into.
+    exp_manager additionally has a resume feature (resume_if_exists) which can be used to continuing training from
+    the constructed log_dir. When you need to continue the training repeatedly (like on a cluster which you need
+    multiple consecutive jobs), you need to avoid creating the version folders. Therefore from v1.0.0, when
+    resume_if_exists is set to True, creating the version folders is ignored.
     Args:
         trainer (pytorch_lightning.Trainer): The lightning trainer.
         cfg (DictConfig, dict): Can have the following keys:
@@ -121,7 +127,8 @@ def exp_manager(trainer: 'pytorch_lightning.Trainer', cfg: Optional[Union[DictCo
             - use_datetime_version (bool): Whether to use a datetime string for version. Defaults to True.
             - resume_if_exists (bool): Whether this experiment is resuming from a previous run. If True, it sets
                 trainer.resume_from_checkpoint so that the trainer should auto-resume. exp_manager will move files
-                under log_dir to log_dir/run_{int}. Defaults to False.
+                under log_dir to log_dir/run_{int}. Defaults to False. From v1.0.0, when resume_if_exists is True,
+                we would not create version folders to make it easier to find the log folder for next runs.
             - resume_past_end (bool): exp_manager errors out if resume_if_exists is True and a checkpoint matching
                 *end.ckpt indicating a previous training run fully completed. This behaviour can be disabled, in which
                 case the *end.ckpt will be loaded by setting resume_past_end to True. Defaults to False.
@@ -143,14 +150,13 @@ def exp_manager(trainer: 'pytorch_lightning.Trainer', cfg: Optional[Union[DictCo
                 Defaults to True.
             - files_to_copy (list): A list of files to copy to the experiment logging directory. Defaults to None which
                 copies no files.
-
     returns:
         log_dir (Path): The final logging directory where logging files are saved. Usually the concatenation of
             exp_dir, name, and version.
     """
     # Add rank information to logger
     # Note: trainer.global_rank and trainer.is_global_zero are not set until trainer.fit, so have to hack around it
-    global_rank = trainer.node_rank * trainer.num_gpus + trainer.local_rank
+    global_rank = trainer.node_rank * trainer.num_gpus + int(os.environ.get("LOCAL_RANK", 0))
     logging.rank = global_rank
 
     if cfg is None:
@@ -178,6 +184,7 @@ def exp_manager(trainer: 'pytorch_lightning.Trainer', cfg: Optional[Union[DictCo
         version=cfg.version,
         explicit_log_dir=cfg.explicit_log_dir,
         use_datetime_version=cfg.use_datetime_version,
+        resume_if_exists=cfg.resume_if_exists,
     )
 
     if cfg.resume_if_exists:
@@ -206,7 +213,7 @@ def exp_manager(trainer: 'pytorch_lightning.Trainer', cfg: Optional[Union[DictCo
     trainer._default_root_dir = log_dir
 
     # Handle Loggers by creating file and handle DEBUG statements
-    log_file = log_dir / f'nemo_log_globalrank-{global_rank}_localrank-{trainer.local_rank}.txt'
+    log_file = log_dir / f'nemo_log_globalrank-{global_rank}_localrank-{int(os.environ.get("LOCAL_RANK", 0))}.txt'
     logging.add_file_handler(log_file)
 
     # For some reason, LearningRateLogger requires trainer to have a logger. Safer to create logger on all ranks
@@ -223,10 +230,10 @@ def exp_manager(trainer: 'pytorch_lightning.Trainer', cfg: Optional[Union[DictCo
             cfg.wandb_logger_kwargs,
         )
 
-    if is_global_rank_zero():
-        if cfg.create_checkpoint_callback:
-            configure_checkpointing(trainer, log_dir, checkpoint_name, cfg.checkpoint_callback_params)
+    if cfg.create_checkpoint_callback:
+        configure_checkpointing(trainer, log_dir, checkpoint_name, cfg.checkpoint_callback_params)
 
+    if is_global_rank_zero():
         # Move files_to_copy to folder and add git information if present
         if cfg.files_to_copy:
             for _file in cfg.files_to_copy:
@@ -257,7 +264,7 @@ def error_checks(trainer: 'pytorch_lightning.Trainer', cfg: Optional[Union[DictC
     Checks that the passed trainer is compliant with NeMo and exp_manager's passed configuration. Checks that:
         - Throws error when hydra has changed the working directory. This causes issues with lightning's DDP
         - Throws error when trainer has loggers defined but create_tensorboard_logger or create_WandB_logger is True
-        - Prints error messages when 1) run on multi-node and not slurm, and 2) run on multi-gpu without DDP
+        - Prints error messages when 1) run on multi-node and not Slurm, and 2) run on multi-gpu without DDP
     """
     if HydraConfig.initialized() and get_original_cwd() != os.getcwd():
         raise ValueError(
@@ -271,9 +278,9 @@ def error_checks(trainer: 'pytorch_lightning.Trainer', cfg: Optional[Union[DictC
             f"{cfg.create_wandb_logger} was set to True. These can only be used if trainer does not already have a"
             " logger."
         )
-    if trainer.num_nodes > 1 and not trainer.is_slurm_managing_tasks:
+    if trainer.num_nodes > 1 and not check_slurm(trainer):
         logging.error(
-            "You are running multi-node without slurm. Please note that this is not tested in NeMo and could result in "
+            "You are running multi-node without Slurm. Please note that this is not tested in NeMo and could result in "
             "errors."
         )
     if trainer.num_gpus > 1 and not trainer.use_ddp:
@@ -291,13 +298,11 @@ def check_resume(
 ):
     """Checks that resume=True was used correctly with the arguments pass to exp_manager. Sets
     trainer.resume_from_checkpoint as necessary.
-
     Returns:
         log_dir (Path): the log_dir
         exp_dir (str): the base exp_dir without name nor version
         name (str): The name of the experiment
         version (str): The version of the experiment
-
     Raises:
         NotFoundError: If resume is True, resume_ignore_no_checkpoint is False, and checkpoints could not be found.
         ValueError: If resume is True, and there were more than 1 checkpoint could found.
@@ -371,13 +376,11 @@ def check_explicit_log_dir(
     trainer: 'pytorch_lightning.Trainer', explicit_log_dir: [Path, str], exp_dir: str, name: str, version: str
 ) -> (Path, str, str, str):
     """ Checks that the passed arguments are compatible with explicit_log_dir.
-
     Returns:
         log_dir (Path): the log_dir
         exp_dir (str): the base exp_dir without name nor version
         name (str): The name of the experiment
         version (str): The version of the experiment
-
     Raise:
         LoggerMisconfigurationError
     """
@@ -405,16 +408,19 @@ def get_log_dir(
     version: str = None,
     explicit_log_dir: str = None,
     use_datetime_version: bool = True,
+    resume_if_exists: bool = False,
 ) -> (Path, str, str, str):
     """
     Obtains the log_dir used for exp_manager.
-
     Returns:
         log_dir (Path): the log_dir
         exp_dir (str): the base exp_dir without name nor version
         name (str): The name of the experiment
         version (str): The version of the experiment
-
+        explicit_log_dir (str): The explicit path to the log folder. Defaults to False.
+        use_datetime_version (bool): Uses date and time as the version of the log folder. Defaults to True.
+        resume_if_exists (bool): if resume_if_exists of the exp_manager's config is enabled or not. When enabled, the
+            version folders would not get created.
     Raise:
         LoggerMisconfigurationError: If trainer is incompatible with arguments
         NotFoundError: If resume is True, resume_ignore_no_checkpoint is False, and checkpoints could not be found.
@@ -452,9 +458,11 @@ def get_log_dir(
         name = name or "default"
         version = version or os.environ.get(NEMO_ENV_VARNAME_VERSION, None)
 
-        if version is None:
-            if trainer.is_slurm_managing_tasks:
-                logging.warning("Running on a slurm cluster. exp_manager will not add a version number.")
+        if not version:
+            if resume_if_exists:
+                logging.warning(
+                    "No version folders would be created under the log folder as 'resume_if_exists' is enabled."
+                )
                 version = ""
             elif is_global_rank_zero():
                 if use_datetime_version:
@@ -471,7 +479,6 @@ def get_log_dir(
 def get_git_hash():
     """
     Helper function that tries to get the commit hash if running inside a git folder
-
     returns:
         Bool: Whether the git subprocess ran without error
         str: git subprocess output or error message
@@ -488,7 +495,6 @@ def get_git_hash():
 def get_git_diff():
     """
     Helper function that tries to get the git diff if running inside a git folder
-
     returns:
         Bool: Whether the git subprocess ran without error
         str: git subprocess output or error message
@@ -564,12 +570,44 @@ class NeMoModelCheckpoint(ModelCheckpoint):
     """ Light wrapper around Lightning's ModelCheckpoint to force a saved checkpoint on train_end
     """
 
-    def __init__(self, save_best_model=False, postfix=".nemo", **kwargs):
+    def __init__(self, always_save_nemo=False, save_best_model=False, postfix=".nemo", **kwargs):
         # Parse and store "extended" parameters: save_best model and postfix.
+        self.always_save_nemo = always_save_nemo
         self.save_best_model = save_best_model
         self.postfix = postfix
+        self.previous_best_path = ""
+
         # Call the parent class constructor with the remaining kwargs.
         super().__init__(**kwargs)
+
+    @rank_zero_only
+    def on_save_checkpoint(self, trainer, pl_module, checkpoint):
+        output = super().on_save_checkpoint(trainer, pl_module, checkpoint)
+
+        if not self.always_save_nemo:
+            return output
+
+        # Load the best model and then re-save it
+        if self.save_best_model:
+            if not os.path.exists(self.best_model_path):
+                return output
+
+            if self.best_model_path == self.previous_best_path:
+                return output
+
+            self.previous_model_path = self.best_model_path
+            old_state_dict = deepcopy(pl_module.state_dict())
+            checkpoint = torch.load(self.best_model_path, map_location='cpu')
+            if 'state_dict' in checkpoint:
+                checkpoint = checkpoint['state_dict']
+            # get a new instanace of the model
+            pl_module.load_state_dict(checkpoint, strict=True)
+            pl_module.save_to(save_path=os.path.join(self.dirpath, self.prefix + self.postfix))
+            pl_module.load_state_dict(old_state_dict, strict=True)
+        else:
+            pl_module.save_to(save_path=os.path.join(self.dirpath, self.prefix + self.postfix))
+
+        return output
 
     @rank_zero_only
     def on_train_end(self, trainer, pl_module):
@@ -582,7 +620,7 @@ class NeMoModelCheckpoint(ModelCheckpoint):
 
 
 def configure_checkpointing(
-    trainer: 'pytorch_lightning.Trainer', log_dir: Path, name: str, params: Dict,
+    trainer: 'pytorch_lightning.Trainer', log_dir: Path, name: str, params: 'DictConfig',
 ):
     """ Adds ModelCheckpoint to trainer. Raises CheckpointMisconfigurationError if trainer already has a ModelCheckpoint
     callback or if trainer.weights_save_path was passed to Trainer.
@@ -600,18 +638,51 @@ def configure_checkpointing(
         )
 
     # Create the callback and attach it to trainer
-    if params.filepath is None:
-        params.filepath = Path(log_dir / 'checkpoints' / f'--{{{params.monitor}:.2f}}-{{epoch}}')
+    if "filepath" in params:
+        if params.filepath is not None:
+            logging.warning("filepath is deprecated. Please switch to dirpath and filename instead")
+            if params.dirpath is None:
+                params.dirpath = Path(params.filepath).parent
+            if params.filename is None:
+                params.filename = Path(params.filepath).name
+        with open_dict(params):
+            del params["filepath"]
+    if params.dirpath is None:
+        params.dirpath = Path(log_dir / 'checkpoints')
+    if params.filename is None:
+        params.filename = f'--{{{params.monitor}:.2f}}-{{epoch}}'
     if params.prefix is None:
         params.prefix = name
 
-    if "val" in params.monitor and trainer.max_epochs != -1 and trainer.max_epochs < trainer.check_val_every_n_epoch:
-        logging.error(
-            "The checkpoint callback was told to monitor a validation value but trainer.max_epochs("
-            f"{trainer.max_epochs}) was less than trainer.check_val_every_n_epoch({trainer.check_val_every_n_epoch})."
-            f"It is very likely this run will fail with ModelCheckpoint(monitor='{params.monitor}') not found in the "
-            "returned metrics. Please ensure that validation is run within trainer.max_epochs."
-        )
+    logging.debug(params.dirpath)
+    logging.debug(params.filename)
+    logging.debug(params.prefix)
+
+    if "val" in params.monitor:
+        if (
+            trainer.max_epochs is not None
+            and trainer.max_epochs != -1
+            and trainer.max_epochs < trainer.check_val_every_n_epoch
+        ):
+            logging.error(
+                "The checkpoint callback was told to monitor a validation value but trainer.max_epochs("
+                f"{trainer.max_epochs}) was less than trainer.check_val_every_n_epoch({trainer.check_val_every_n_epoch}"
+                f"). It is very likely this run will fail with ModelCheckpoint(monitor='{params.monitor}') not found "
+                "in the returned metrics. Please ensure that validation is run within trainer.max_epochs."
+            )
+        elif trainer.max_steps is not None:
+            logging.warning(
+                "The checkpoint callback was told to monitor a validation value and trainer's max_steps was set to "
+                f"{trainer.max_steps}. Please ensure that max_steps will run for at least "
+                f"{trainer.check_val_every_n_epoch} epochs to ensure that checkpointing will not error out."
+            )
 
     checkpoint_callback = NeMoModelCheckpoint(**params)
     trainer.callbacks.append(checkpoint_callback)
+
+
+def check_slurm(trainer):
+    try:
+        return trainer.is_slurm_managing_tasks
+    except AttributeError:
+        return False

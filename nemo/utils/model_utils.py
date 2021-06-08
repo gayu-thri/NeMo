@@ -23,6 +23,7 @@ import pytorch_lightning as pl
 import wrapt
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from omegaconf import errors as omegaconf_errors
+from packaging import version
 
 from nemo.utils import logging
 
@@ -45,6 +46,7 @@ class ArtifactPathType(Enum):
 class ArtifactItem:
     path: str
     path_type: ArtifactPathType
+    hashed_path: Optional[str] = None
 
 
 def resolve_dataset_name_from_cfg(cfg: DictConfig) -> str:
@@ -386,7 +388,7 @@ def _convert_config(cfg: OmegaConf):
             if isinstance(sub_cfg, DictConfig):
                 _convert_config(sub_cfg)
     except omegaconf_errors.OmegaConfBaseException as e:
-        logging.warning(f"Skipping config conversion for cfg:\n{cfg}\n due to OmegaConf error encountered :\n{e}.")
+        logging.warning(f"Skipped conversion for config/subconfig:\n{cfg}\n Reason: {e}.")
 
 
 def maybe_update_config_version(cfg: DictConfig):
@@ -414,3 +416,104 @@ def maybe_update_config_version(cfg: DictConfig):
     OmegaConf.set_struct(cfg, True)
 
     return cfg
+
+
+def import_class_by_path(path: str):
+    """
+    Recursive import of class by path string.
+    """
+    paths = path.split('.')
+    path = ".".join(paths[:-1])
+    class_name = paths[-1]
+    mod = __import__(path, fromlist=[class_name])
+    mod = getattr(mod, class_name)
+    return mod
+
+
+def resolve_subclass_pretrained_model_info(base_class) -> List['PretrainedModelInfo']:
+    """
+    Recursively traverses the inheritance graph of subclasses to extract all pretrained model info.
+    First constructs a set of unique pretrained model info by performing DFS over the inheritance graph.
+    All model info belonging to the same class is added together.
+
+    Args:
+        base_class: The root class, whose subclass graph will be traversed.
+
+    Returns:
+        A list of unique pretrained model infos belonging to all of the inherited subclasses of
+        this baseclass.
+    """
+    list_of_models = set()
+
+    def recursive_subclass_walk(cls):
+        for subclass in cls.__subclasses__():
+            # step into its immediate subclass
+            recursive_subclass_walk(subclass)
+
+            subclass_models = subclass.list_available_models()
+
+            if subclass_models is not None and len(subclass_models) > 0:
+                # Inject subclass info into pretrained model info
+                # if not already overriden by subclass
+                for model_info in subclass_models:
+                    # If subclass manually injects class_, dont override.
+                    if model_info.class_ is None:
+                        model_info.class_ = subclass
+
+                for model_info in subclass_models:
+                    list_of_models.add(model_info)
+
+    recursive_subclass_walk(base_class)
+
+    list_of_models = list(sorted(list_of_models))
+    return list_of_models
+
+
+def check_lib_version(lib_name: str, checked_version: str, operator) -> (Optional[bool], str):
+    """
+    Checks if a library is installed, and if it is, checks the operator(lib.__version__, checked_version) as a result.
+    This bool result along with a string analysis of result is returned.
+
+    If the library is not installed at all, then returns None instead, along with a string explaining
+    that the library is not installed
+
+    Args:
+        lib_name: lower case str name of the library that must be imported.
+        checked_version: semver string that is compared against lib.__version__.
+        operator: binary callable function func(a, b) -> bool; that compares lib.__version__ against version in
+            some manner. Must return a boolean.
+
+    Returns:
+        A tuple of results:
+        -   Bool or None. Bool if the library could be imported, and the result of
+            operator(lib.__version__, checked_version) or False if __version__ is not implemented in lib.
+            None is passed if the library is not installed at all.
+        -   A string analysis of the check.
+    """
+    try:
+        mod = __import__(lib_name)
+
+        if hasattr(mod, '__version__'):
+            lib_ver = version.Version(mod.__version__)
+            match_ver = version.Version(checked_version)
+
+            if operator(lib_ver, match_ver):
+                msg = f"Lib {lib_name} version is satisfied !"
+                return True, msg
+            else:
+                msg = (
+                    f"Lib {lib_name} version ({lib_ver}) is not {operator.__name__} than required version {checked_version}.\n"
+                    f"Please upgrade the lib using either pip or conda to the latest version."
+                )
+                return False, msg
+        else:
+            msg = (
+                f"Lib {lib_name} does not implement __version__ in its init file. "
+                f"Could not check version compatibility."
+            )
+            return False, msg
+    except (ImportError, ModuleNotFoundError):
+        pass
+
+    msg = f"Lib {lib_name} has not been installed. Please use pip or conda to install this package."
+    return None, msg

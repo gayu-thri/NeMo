@@ -18,6 +18,7 @@ import os
 import pickle as pkl
 from typing import Dict, List, Optional, Union
 
+import librosa
 import torch
 from omegaconf import DictConfig
 from omegaconf.omegaconf import open_dict
@@ -26,8 +27,8 @@ from pytorch_lightning import Trainer
 from nemo.collections.asr.data.audio_to_label import AudioToSpeechLabelDataset
 from nemo.collections.asr.losses.angularloss import AngularSoftmaxLoss
 from nemo.collections.asr.models.asr_model import ExportableEncDecModel
-from nemo.collections.asr.parts.features import WaveformFeaturizer
-from nemo.collections.asr.parts.perturb import process_augmentations
+from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
+from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 from nemo.collections.common.losses import CrossEntropyLoss as CELoss
 from nemo.collections.common.metrics import TopKClassificationAccuracy
 from nemo.core.classes import ModelPT
@@ -57,16 +58,23 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
         """
         result = []
         model = PretrainedModelInfo(
-            pretrained_model_name="SpeakerNet_recognition",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemospeechmodels/versions/1.0.0a5/files/SpeakerNet_recognition.nemo",
-            description="SpeakerNet_recognition model trained end-to-end for speaker recognition purposes with cross_entropy loss. It was trained on voxceleb 1, voxceleb 2 dev datasets and augmented with musan music and noise. Speaker Recognition model achieves 2.65% EER on voxceleb-O cleaned trial file",
+            pretrained_model_name="speakerrecognition_speakernet",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/speakerrecognition_speakernet/versions/1.0.0rc1/files/speakerrecognition_speakernet.nemo",
+            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:speakerrecognition_speakernet",
         )
         result.append(model)
 
         model = PretrainedModelInfo(
-            pretrained_model_name="SpeakerNet_verification",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemospeechmodels/versions/1.0.0a5/files/SpeakerNet_verification.nemo",
-            description="SpeakerNet_verification model trained end-to-end for speaker verification purposes with arcface angular softmax loss. It was trained on voxceleb 1, voxceleb 2 dev datasets and augmented with musan music and noise. Speaker Verification model achieves 2.12% EER on voxceleb-O cleaned trial file",
+            pretrained_model_name="speakerverification_speakernet",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/speakerverification_speakernet/versions/1.0.0rc1/files/speakerverification_speakernet.nemo",
+            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:speakerverification_speakernet",
+        )
+        result.append(model)
+
+        model = PretrainedModelInfo(
+            pretrained_model_name="speakerdiarization_speakernet",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/speakerdiarization_speakernet/versions/1.0.0rc1/files/speakerdiarization_speakernet.nemo",
+            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:speakerdiarization_speakernet",
         )
         result.append(model)
 
@@ -104,7 +112,6 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
             max_duration=config.get('max_duration', None),
             min_duration=config.get('min_duration', None),
             trim=False,
-            load_audio=config.get('load_audio', True),
             time_length=config.get('time_length', 8),
             shift_length=config.get('shift_length', 0.75),
         )
@@ -199,6 +206,7 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
 
         self._accuracy(logits=logits, labels=labels)
         top_k = self._accuracy.compute()
+        self._accuracy.reset()
         for i, top_i in enumerate(top_k):
             self.log(f'training_batch_accuracy_top@{i}', top_i)
 
@@ -226,6 +234,7 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
         self._accuracy.correct_counts_k = correct_counts
         self._accuracy.total_counts_k = total_counts
         topk_scores = self._accuracy.compute()
+        self._accuracy.reset()
 
         logging.info("val_loss: {:.3f}".format(val_loss_mean))
         self.log('val_loss', val_loss_mean)
@@ -259,6 +268,7 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
         self._accuracy.correct_counts_k = correct_counts
         self._accuracy.total_counts_k = total_counts
         topk_scores = self._accuracy.compute()
+        self._accuracy.reset()
 
         logging.info("test_loss: {:.3f}".format(test_loss_mean))
         self.log('test_loss', test_loss_mean)
@@ -327,6 +337,29 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
             self._cfg.decoder = new_decoder_config
 
         logging.info(f"Changed decoder output to # {self.decoder._num_classes} classes.")
+
+    @torch.no_grad()
+    def get_embedding(self, path2audio_file):
+        audio, sr = librosa.load(path2audio_file, sr=None)
+        target_sr = self._cfg.train_ds.get('sample_rate', 16000)
+        if sr != target_sr:
+            audio = librosa.core.resample(audio, sr, target_sr)
+        audio_length = audio.shape[0]
+        device = self.device
+        audio_signal, audio_signal_len = (
+            torch.tensor([audio], device=device),
+            torch.tensor([audio_length], device=device),
+        )
+        mode = self.training
+        self.freeze()
+
+        _, embs = self.forward(input_signal=audio_signal, input_signal_length=audio_signal_len)
+
+        self.train(mode=mode)
+        if mode is True:
+            self.unfreeze()
+        del audio_signal, audio_signal_len
+        return embs
 
 
 class ExtractSpeakerEmbeddingsModel(EncDecSpeakerLabelModel):

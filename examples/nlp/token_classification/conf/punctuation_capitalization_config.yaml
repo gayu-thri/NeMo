@@ -15,7 +15,7 @@
 # Punctuation and capitalization model with pretrained BERT-like models
 
 pretrained_model: null # pretrained Punctuation and Capitalization model from list_available_models(), for example:
-# Punctuation_Capitalization_with_BERT_base_uncased or Punctuation_Capitalization_with_DistilBERT_base_uncased
+# punctuation_en_bert or punctuation_en_distilbert
 # or your_model.nemo
 trainer:
   gpus: 2 # the number of gpus, 0 for CPU
@@ -37,10 +37,9 @@ exp_manager:
   exp_dir: null  # exp_dir for your experiment, if None, defaults to "./nemo_experiments"
   name: Punctuation_and_Capitalization  # The name of your model
   create_tensorboard_logger: true  # Whether you want exp_manger to create a tb logger
-  create_checkpoint_callback: true  # Whether you want exp_manager to create a modelcheckpoint callback
+  create_checkpoint_callback: true  # Whether you want exp_manager to create a model checkpoint callback
 
 model:
-  nemo_path: null # filename to save the model and associated artifacts to .nemo file
   punct_label_ids: null # will be filled during training
   capit_label_ids: null # will be filled during training
   class_labels:

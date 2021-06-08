@@ -99,14 +99,14 @@ class WaveGlowModule(NeuralModule, Exportable):
         self.removed_weightnorm = False
         self.converted_to_2D = False
 
-    def _prepare_for_export(self):
+    def _prepare_for_export(self, **kwargs):
         """
         Override this method to prepare module for export. This is in-place operation.
         Base version does common necessary module replacements (Apex etc)
         """
         self.remove_weightnorm()
         if not self.converted_to_2D:
-            super()._prepare_for_export(replace_1D_2D=True)
+            super()._prepare_for_export(replace_1D_2D=True, **kwargs)
             self.converted_to_2D = True
 
     @typecheck()
@@ -147,8 +147,8 @@ class WaveGlowModule(NeuralModule, Exportable):
         if self.mode == OperationMode.training or self.mode == OperationMode.validation:
             return {
                 "pred_normal_dist": NeuralType(('B', 'flowgroup', 'T'), NormalDistributionSamplesType()),
-                "log_s_list": NeuralType(('B', 'flowgroup', 'T'), VoidType()),  # TODO: Figure out a good typing
-                "log_det_W_list": NeuralType(elements_type=VoidType()),  # TODO: Figure out a good typing
+                "log_s_list": [NeuralType(('B', 'flowgroup', 'T'), VoidType())],  # TODO: Figure out a good typing
+                "log_det_W_list": [NeuralType(elements_type=VoidType())],  # TODO: Figure out a good typing
                 "audio_pred": NeuralType(('B', 'T'), AudioSignal()),
             }
         else:

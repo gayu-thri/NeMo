@@ -90,8 +90,8 @@ class WaveGlowModel(GlowVocoder, Exportable):
         if self.mode == OperationMode.training or self.mode == OperationMode.validation:
             output_dict = {
                 "pred_normal_dist": NeuralType(('B', 'flowgroup', 'T'), NormalDistributionSamplesType()),
-                "log_s_list": NeuralType(('B', 'flowgroup', 'T'), VoidType()),  # TODO: Figure out a good typing
-                "log_det_W_list": NeuralType(elements_type=LogDeterminantType()),
+                "log_s_list": [NeuralType(('B', 'flowgroup', 'T'), VoidType())],  # TODO: Figure out a good typing
+                "log_det_W_list": [NeuralType(elements_type=LogDeterminantType())],
             }
             if self.mode == OperationMode.validation:
                 output_dict["audio_pred"] = NeuralType(('B', 'T'), AudioSignal())
@@ -135,7 +135,7 @@ class WaveGlowModel(GlowVocoder, Exportable):
                 spec=spec.to(self.waveglow.upsample.weight.dtype), run_inverse=True, audio=None, sigma=sigma
             )
             if denoise:
-                audio = self.denoise(audio, denoiser_strength)
+                audio = self.denoise(audio=audio, strength=denoiser_strength)
 
         return audio
 
@@ -220,10 +220,18 @@ class WaveGlowModel(GlowVocoder, Exportable):
         """
         list_of_models = []
         model = PretrainedModelInfo(
-            pretrained_model_name="WaveGlow-22050Hz",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemottsmodels/versions/1.0.0a5/files/WaveGlow-22050Hz.nemo",
-            description="This model is trained on LJSpeech sampled at 22050Hz, and can be used as an universal vocoder.",
+            pretrained_model_name="tts_waveglow_268m",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/tts_waveglow_268m/versions/1.0.0rc1/files/tts_waveglow_268m.nemo",
+            description="This model is trained on LJSpeech sampled at 22050Hz, and has been tested on generating female English voices with an American accent and Mandarin voices.",
             class_=cls,
+        )
+        list_of_models.append(model)
+        model = PretrainedModelInfo(
+            pretrained_model_name="tts_waveglow_88m",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/tts_waveglow_88m/versions/1.0.0/files/tts_waveglow.nemo",
+            description="This model is trained on LJSpeech sampled at 22050Hz, and has been tested on generating female English voices with an American accent and Mandarin voices.",
+            class_=cls,
+            aliases=["WaveGlow-22050Hz", "tts_waveglow"],
         )
         list_of_models.append(model)
         return list_of_models
@@ -236,9 +244,17 @@ class WaveGlowModel(GlowVocoder, Exportable):
     def output_module(self):
         return self.waveglow
 
-    def _prepare_for_export(self):
+    def _prepare_for_export(self, **kwargs):
         self.update_bias_spect()
-        self.waveglow._prepare_for_export()
+        self.waveglow._prepare_for_export(**kwargs)
 
     def forward_for_export(self, spec, z=None):
         return self.waveglow(spec, z)
+
+    def load_state_dict(self, state_dict, strict=True):
+        # Remove convinv.inv_conv weights since they are not initialized until forward is called during training
+        # and can be computed from convinv.conv.weight
+        # Ideally, we should remove this during saving instead of ignoring during loading
+        for i in range(self._cfg.waveglow.n_flows):
+            del state_dict[f"waveglow.convinv.{i}.inv_conv.weight"]
+        super().load_state_dict(state_dict, strict=strict)

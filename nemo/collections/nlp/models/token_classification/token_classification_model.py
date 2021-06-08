@@ -69,9 +69,10 @@ class TokenClassificationModel(NLPModel):
 
         self.bert_model = get_lm_model(
             pretrained_model_name=cfg.language_model.pretrained_model_name,
-            config_file=cfg.language_model.config_file,
+            config_file=self.register_artifact('language_model.config_file', cfg.language_model.config_file),
             config_dict=OmegaConf.to_container(cfg.language_model.config) if cfg.language_model.config else None,
             checkpoint_file=cfg.language_model.lm_checkpoint,
+            vocab_file=self.register_artifact('tokenizer.vocab_file', cfg.tokenizer.vocab_file),
         )
 
         self.classifier = TokenClassifier(
@@ -180,6 +181,8 @@ class TokenClassificationModel(NLPModel):
         self.log('f1', f1)
         self.log('recall', recall)
 
+        self.classification_report.reset()
+
     def test_step(self, batch, batch_idx):
         input_ids, input_type_ids, input_mask, subtokens_mask, loss_mask, labels = batch
         logits = self(input_ids=input_ids, token_type_ids=input_type_ids, attention_mask=input_mask)
@@ -228,7 +231,7 @@ class TokenClassificationModel(NLPModel):
         # save label maps to the config
         self._cfg.label_ids = OmegaConf.create(label_ids)
 
-        self.register_artifact(self._cfg.class_labels.class_labels_file, label_ids_filename)
+        self.register_artifact('class_labels.class_labels_file', label_ids_filename)
         self._train_dl = self._setup_dataloader_from_config(cfg=train_data_config)
 
     def setup_validation_data(self, val_data_config: Optional[DictConfig] = None):
@@ -511,12 +514,9 @@ class TokenClassificationModel(NLPModel):
         """
         result = []
         model = PretrainedModelInfo(
-            pretrained_model_name="NERModel",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemonlpmodels/versions/1.0.0a5/files/NERModel.nemo",
+            pretrained_model_name="ner_en_bert",
+            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/ner_en_bert/versions/1.0.0rc1/files/ner_en_bert.nemo",
             description="The model was trained on GMB (Groningen Meaning Bank) corpus for entity recognition and achieves 74.61 F1 Macro score.",
         )
         result.append(model)
         return result
-
-    def _prepare_for_export(self):
-        return self.bert_model._prepare_for_export()

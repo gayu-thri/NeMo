@@ -15,9 +15,50 @@
 from typing import Optional
 
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, open_dict
 
 from nemo.collections.asr.data import audio_to_text, audio_to_text_dali
+from nemo.utils import logging
+
+
+def inject_dataloader_value_from_model_config(model_cfg: dict, dataloader_cfg: dict, key: str):
+    """
+    Extracts the label set provided at the top level of the model, and propagates it to the dataloader
+    config.
+
+    Args:
+        model_cfg: A DictConfig representing the model's config.
+        dataloader_cfg: A DictConfig representing the individual data loader
+        key: A str value representing a key in the model_cfg whose value will be propagated to the
+            dataloader config.
+    """
+    if key not in model_cfg:
+        logging.info(
+            f"Model level config does not container `{key}`, please explicitly provide `{key}` to the dataloaders."
+        )
+        return
+
+    # If key exists in the data loader config (either set explicitly or as a placeholder (via None))
+    if key in dataloader_cfg:
+        # Dataloader `labels` is provided and is non-null
+        if dataloader_cfg[key] is not None and model_cfg[key] != dataloader_cfg[key]:
+            # Model level `labels` dont match Dataloader level `labels`
+            logging.warning(
+                f'`{key}` is explicitly provided to the data loader, and is different from '
+                f'the `{key}` provided at the model level config.\n'
+                f'If this is incorrect, please set the dataloader\'s `{key}` to None.'
+            )
+
+        else:
+            # Dataloader `key` is None or values match
+            # Propagate from model level `key` (even if they match)
+            with open_dict(dataloader_cfg):
+                dataloader_cfg[key] = model_cfg[key]
+
+    else:
+        # If key key doesnt even exist in dataloader_cfg, inject it explicitly
+        with open_dict(dataloader_cfg):
+            dataloader_cfg[key] = model_cfg[key]
 
 
 def get_char_dataset(config: dict, augmentor: Optional['AudioAugmentor'] = None) -> audio_to_text.AudioToCharDataset:
@@ -44,9 +85,7 @@ def get_char_dataset(config: dict, augmentor: Optional['AudioAugmentor'] = None)
         unk_index=config.get('unk_index', -1),
         normalize=config.get('normalize_transcripts', False),
         trim=config.get('trim_silence', False),
-        load_audio=config.get('load_audio', True),
         parser=config.get('parser', 'en'),
-        add_misc=config.get('add_misc', False),
     )
     return dataset
 
@@ -75,8 +114,6 @@ def get_bpe_dataset(
         min_duration=config.get('min_duration', None),
         max_utts=config.get('max_utts', 0),
         trim=config.get('trim_silence', False),
-        load_audio=config.get('load_audio', True),
-        add_misc=config.get('add_misc', False),
         use_start_end_token=config.get('use_start_end_token', True),
     )
     return dataset
@@ -115,7 +152,6 @@ def get_tarred_char_dataset(
         normalize=config.get('normalize_transcripts', False),
         trim=config.get('trim_silence', False),
         parser=config.get('parser', 'en'),
-        add_misc=config.get('add_misc', False),
         shard_strategy=config.get('tarred_shard_strategy', 'scatter'),
         global_rank=global_rank,
         world_size=world_size,
@@ -158,7 +194,6 @@ def get_tarred_bpe_dataset(
         min_duration=config.get('min_duration', None),
         max_utts=config.get('max_utts', 0),
         trim=config.get('trim_silence', False),
-        add_misc=config.get('add_misc', False),
         use_start_end_token=config.get('use_start_end_token', True),
         shard_strategy=config.get('tarred_shard_strategy', 'scatter'),
         global_rank=global_rank,

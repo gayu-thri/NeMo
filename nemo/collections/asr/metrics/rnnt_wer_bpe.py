@@ -12,16 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List
 
 import editdistance
 import torch
-from pytorch_lightning.metrics import Metric
+from torchmetrics import Metric
 
 from nemo.collections.asr.metrics.rnnt_wer import AbstractRNNTDecoding
-from nemo.collections.asr.parts import rnnt_beam_decoding as beam_decode
-from nemo.collections.asr.parts import rnnt_greedy_decoding as greedy_decode
-from nemo.collections.asr.parts.rnnt_utils import Hypothesis, NBestHypotheses
+from nemo.collections.asr.parts.submodules import rnnt_beam_decoding as beam_decode
+from nemo.collections.asr.parts.submodules import rnnt_greedy_decoding as greedy_decode
 from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 from nemo.utils import logging
 
@@ -42,6 +42,17 @@ class RNNTBPEDecoding(AbstractRNNTDecoding):
             compute_hypothesis_token_set: A bool flag, which determines whether to compute a list of decoded
                 tokens as well as the decoded string. Default is False in order to avoid double decoding
                 unless required.
+
+            preserve_alignments: Bool flag which preserves the history of logprobs generated during
+                decoding (sample / batched). When set to true, the Hypothesis will contain
+                the non-null value for `logprobs` in it. Here, `logprobs` is a List of torch.Tensors.
+
+                In order to obtain this hypothesis, please utilize `rnnt_decoder_predictions_tensor` function
+                with the `return_hypotheses` flag set to True.
+
+                The length of the list corresponds to the Acoustic Length (T).
+                Each value in the list (Ti) is a torch.Tensor (U), representing 1 or more targets from a vocabulary.
+                U is the number of target tokens for the current timestep Ti.
 
             The config may further contain the following sub-dictionaries:
             "greedy":
@@ -217,3 +228,15 @@ class RNNTBPEWER(Metric):
     def compute(self):
         wer = self.scores.float() / self.words
         return wer, self.scores.detach(), self.words.detach()
+
+
+@dataclass
+class RNNTBPEDecodingConfig:
+    strategy: str = "greedy_batch"
+    compute_hypothesis_token_set: bool = False
+
+    # greedy decoding config
+    greedy: greedy_decode.GreedyRNNTInferConfig = greedy_decode.GreedyRNNTInferConfig()
+
+    # beam decoding config
+    beam: beam_decode.BeamRNNTInferConfig = beam_decode.BeamRNNTInferConfig(beam_size=4)

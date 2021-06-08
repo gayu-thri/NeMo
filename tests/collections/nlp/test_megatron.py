@@ -21,40 +21,56 @@ except Exception:
 
 import os
 import tempfile
-from unittest import TestCase
 
 import onnx
 import pytest
 import torch
 
 import nemo.collections.nlp as nemo_nlp
+from nemo.core.classes import typecheck
 
 
-class TestMegatron(TestCase):
+def get_pretrained_bert_345m_uncased_model():
+    model_name = "megatron-bert-345m-uncased"
+    model = nemo_nlp.modules.get_lm_model(pretrained_model_name=model_name)
+    if torch.cuda.is_available():
+        model = model.cuda()
+    return model
+
+
+class TestMegatron:
     @pytest.mark.run_only_on('GPU')
     @pytest.mark.unit
     def test_list_pretrained_models(self):
         pretrained_lm_models = nemo_nlp.modules.get_pretrained_lm_models_list()
-        self.assertTrue(len(pretrained_lm_models) > 0)
+        assert len(pretrained_lm_models) > 0
 
+    @pytest.mark.with_downloads()
     @pytest.mark.run_only_on('GPU')
     @pytest.mark.unit
-    @pytest.mark.skip
-    def test_get_pretrained_bert_345m_uncased_model(self):
-        model_name = "megatron-bert-345m-uncased"
-        model = nemo_nlp.modules.get_lm_model(pretrained_model_name=model_name)
-        if torch.cuda.is_available():
-            model = model.cuda()
-
+    @pytest.mark.skip("Only one Megatron model is allowed")
+    def test_get_model(self):
+        model = get_pretrained_bert_345m_uncased_model()
         assert isinstance(model, nemo_nlp.modules.MegatronBertEncoder)
 
-        if False:  #  apex_available:
-            model = apex.amp.initialize(model, opt_level="O2")
+        typecheck.set_typecheck_enabled(enabled=False)
+        inp = model.input_example()
+        out = model.forward(*inp)
+        typecheck.set_typecheck_enabled(enabled=True)
+
+    @pytest.mark.skipif(not os.path.exists('/home/TestData/nlp'), reason='Not a Jenkins machine')
+    @pytest.mark.with_downloads()
+    @pytest.mark.run_only_on('GPU')
+    @pytest.mark.unit
+    def test_onnx_export(self):
+        model = get_pretrained_bert_345m_uncased_model()
+        assert model
         with tempfile.TemporaryDirectory() as tmpdir:
             # Generate filename in the temporary directory.
-            tmp_file_name = os.path.join(model_name + ".onnx")
             # Test export.
-            model.export(tmp_file_name, check_trace=False)
-            modelX = onnx.load(tmp_file_name)
-            with open(tmp_file_name + '.txt', 'w') as o:
-                o.write('Model :\n\n{}'.format(onnx.helper.printable_graph(modelX.graph)))
+            model.export(os.path.join(tmpdir, "megatron.onnx"))
+
+
+if __name__ == "__main__":
+    t = TestMegatron()
+    t.test_onnx_export()

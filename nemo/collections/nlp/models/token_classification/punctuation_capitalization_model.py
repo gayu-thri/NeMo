@@ -60,9 +60,10 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
 
         self.bert_model = get_lm_model(
             pretrained_model_name=cfg.language_model.pretrained_model_name,
-            config_file=cfg.language_model.config_file,
+            config_file=self.register_artifact('language_model.config_file', cfg.language_model.config_file),
             config_dict=OmegaConf.to_container(cfg.language_model.config) if cfg.language_model.config else None,
             checkpoint_file=cfg.language_model.lm_checkpoint,
+            vocab_file=self.register_artifact('tokenizer.vocab_file', cfg.tokenizer.vocab_file),
         )
 
         self.punct_classifier = TokenClassifier(
@@ -216,6 +217,9 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
         self.log('capit_f1', capit_f1)
         self.log('capit_recall', capit_recall)
 
+        self.punct_class_report.reset()
+        self.capit_class_report.reset()
+
     def multi_test_epoch_end(self, outputs, dataloader_idx: int = 0):
         """
             Called at the end of test to aggregate outputs.
@@ -268,12 +272,8 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
         self._train_dl = self._setup_dataloader_from_config(cfg=train_data_config)
 
         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-            self.register_artifact(
-                self._cfg.class_labels.punct_labels_file, self._train_dl.dataset.punct_label_ids_file
-            )
-            self.register_artifact(
-                self._cfg.class_labels.capit_labels_file, self._train_dl.dataset.capit_label_ids_file
-            )
+            self.register_artifact('class_labels.punct_labels_file', self._train_dl.dataset.punct_label_ids_file)
+            self.register_artifact('class_labels.capit_labels_file', self._train_dl.dataset.capit_label_ids_file)
 
             # save label maps to the config
             self._cfg.punct_label_ids = OmegaConf.create(self._train_dl.dataset.punct_label_ids)
@@ -335,20 +335,24 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
             drop_last=self._cfg.dataset.drop_last,
         )
 
-    def _setup_infer_dataloader(self, queries: List[str], batch_size: int) -> 'torch.utils.data.DataLoader':
+    def _setup_infer_dataloader(
+        self, queries: List[str], batch_size: int, max_seq_length: int = None
+    ) -> 'torch.utils.data.DataLoader':
         """
         Setup function for a infer data loader.
 
         Args:
             queries: lower cased text without punctuation
             batch_size: batch size to use during inference
-
+            max_seq_length: maximum sequence length after tokenization
         Returns:
             A pytorch DataLoader.
         """
+        if max_seq_length is None:
+            max_seq_length = self._cfg.dataset.max_seq_length
 
         dataset = BertPunctuationCapitalizationInferDataset(
-            tokenizer=self.tokenizer, queries=queries, max_seq_length=self._cfg.dataset.max_seq_length
+            tokenizer=self.tokenizer, queries=queries, max_seq_length=max_seq_length
         )
 
         return torch.utils.data.DataLoader(
@@ -361,12 +365,15 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
             drop_last=False,
         )
 
-    def add_punctuation_capitalization(self, queries: List[str], batch_size: int = None) -> List[str]:
+    def add_punctuation_capitalization(
+        self, queries: List[str], batch_size: int = None, max_seq_length: int = 512
+    ) -> List[str]:
         """
         Adds punctuation and capitalization to the queries. Use this method for debugging and prototyping.
         Args:
             queries: lower cased text without punctuation
             batch_size: batch size to use during inference
+            max_seq_length: maximum sequence length after tokenization
         Returns:
             result: text with added capitalization and punctuation
         """
@@ -386,7 +393,8 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
             # Switch model to evaluation mode
             self.eval()
             self = self.to(device)
-            infer_datalayer = self._setup_infer_dataloader(queries, batch_size)
+
+            infer_datalayer = self._setup_infer_dataloader(queries, batch_size, max_seq_length)
 
             # store predictions for all queries in a single list
             all_punct_preds = []
@@ -402,39 +410,43 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
                 )
 
                 subtokens_mask = subtokens_mask > 0.5
-                punct_preds = tensor2list(torch.argmax(punct_logits, axis=-1)[subtokens_mask])
-                capit_preds = tensor2list(torch.argmax(capit_logits, axis=-1)[subtokens_mask])
+
+                punct_preds = [
+                    tensor2list(p_l[subtokens_mask[i]]) for i, p_l in enumerate(torch.argmax(punct_logits, axis=-1))
+                ]
+                capit_preds = [
+                    tensor2list(c_l[subtokens_mask[i]]) for i, c_l in enumerate(torch.argmax(capit_logits, axis=-1))
+                ]
+
                 all_punct_preds.extend(punct_preds)
                 all_capit_preds.extend(capit_preds)
-
-            queries = [q.strip().split() for q in queries]
-            queries_len = [len(q) for q in queries]
-
-            if sum(queries_len) != len(all_punct_preds) or sum(queries_len) != len(all_capit_preds):
-                raise ValueError('Pred and words must have the same length')
 
             punct_ids_to_labels = {v: k for k, v in self._cfg.punct_label_ids.items()}
             capit_ids_to_labels = {v: k for k, v in self._cfg.capit_label_ids.items()}
 
-            start_idx = 0
-            end_idx = 0
-            pad_label = self._cfg.dataset.pad_label
-            for query in queries:
-                end_idx += len(query)
-                # extract predictions for the current query from the list of all predictions
-                punct_preds = all_punct_preds[start_idx:end_idx]
-                capit_preds = all_capit_preds[start_idx:end_idx]
-                start_idx = end_idx
+            queries = [q.strip().split() for q in queries]
+            for i, query in enumerate(queries):
+                punct_preds = all_punct_preds[i]
+                capit_preds = all_capit_preds[i]
+                if len(query) != len(punct_preds):
+                    logging.warning(
+                        f'Max sequence length of query {query} is set to {max_seq_length}. Truncating the input.'
+                    )
+
+                    # removing the end of phrase punctuation of the truncated segment
+                    punct_preds[-1] = 0
+                    max_len = len(punct_preds)
+                    query = query[:max_len]
 
                 query_with_punct_and_capit = ''
                 for j, word in enumerate(query):
                     punct_label = punct_ids_to_labels[punct_preds[j]]
                     capit_label = capit_ids_to_labels[capit_preds[j]]
 
-                    if capit_label != pad_label:
+                    if capit_label != self._cfg.dataset.pad_label:
                         word = word.capitalize()
                     query_with_punct_and_capit += word
-                    if punct_label != pad_label:
+                    if punct_label != self._cfg.dataset.pad_label:
                         query_with_punct_and_capit += punct_label
                     query_with_punct_and_capit += ' '
 
@@ -455,15 +467,15 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
         result = []
         result.append(
             PretrainedModelInfo(
-                pretrained_model_name="Punctuation_Capitalization_with_BERT",
-                location="https://api.ngc.nvidia.com/v2/models/nvidia/nemonlpmodels/versions/1.0.0a5/files/Punctuation_Capitalization_with_BERT.nemo",
+                pretrained_model_name="punctuation_en_bert",
+                location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/punctuation_en_bert/versions/1.0.0rc1/files/punctuation_en_bert.nemo",
                 description="The model was trained with NeMo BERT base uncased checkpoint on a subset of data from the following sources: Tatoeba sentences, books from Project Gutenberg, Fisher transcripts.",
             )
         )
         result.append(
             PretrainedModelInfo(
-                pretrained_model_name="Punctuation_Capitalization_with_DistilBERT",
-                location="https://api.ngc.nvidia.com/v2/models/nvidia/nemonlpmodels/versions/1.0.0a5/files/Punctuation_Capitalization_with_DistilBERT.nemo",
+                pretrained_model_name="punctuation_en_distilbert",
+                location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/punctuation_en_distilbert/versions/1.0.0rc1/files/punctuation_en_distilbert.nemo",
                 description="The model was trained with DiltilBERT base uncased checkpoint from HuggingFace on a subset of data from the following sources: Tatoeba sentences, books from Project Gutenberg, Fisher transcripts.",
             )
         )

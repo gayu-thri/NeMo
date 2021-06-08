@@ -35,7 +35,6 @@ import re
 from typing import List
 
 import jieba
-import opencc
 from pangu import spacing
 
 
@@ -45,7 +44,11 @@ class ChineseProcessor:
     """
 
     def __init__(self):
-        self.normalizer = opencc.OpenCC('t2s.json')
+        try:
+            import opencc
+            self.normalizer = opencc.OpenCC('t2s.json')
+        except ImportError:
+            raise ImportError("opencc is not installed. Install it using pip")
 
     def normalize(self, text: str) -> str:
         return self.normalizer.convert(text)

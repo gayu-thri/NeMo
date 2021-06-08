@@ -489,12 +489,12 @@ class PunctuationCapitalizationModel(NLPModel, Exportable):
     def output_module(self):
         return self
 
-    def _prepare_for_export(self):
+    def _prepare_for_export_not_native(self):
         self.bert_model._prepare_for_export()
         self.punct_classifier._prepare_for_export()
         self.capit_classifier._prepare_for_export()
 
-    def export(
+    def export_not_native(
         self,
         output: str,
         input_example=None,

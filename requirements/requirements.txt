@@ -13,7 +13,7 @@ transformers>=4.0.1
 sentencepiece<1.0.0
 webdataset
 tqdm>=4.41.0
-opencc
+opencc>=1.1.0
 pangu
 jieba
 numba

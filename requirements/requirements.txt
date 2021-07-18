@@ -8,7 +8,7 @@ wget
 wrapt
 ruamel.yaml
 scikit-learn
-omegaconf>=2.1.0
+omegaconf
 hydra-core>=1.1.0
 transformers>=4.0.1
 sentencepiece<1.0.0

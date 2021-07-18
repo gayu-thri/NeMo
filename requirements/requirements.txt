@@ -9,7 +9,7 @@ wrapt
 ruamel.yaml
 scikit-learn
 omegaconf
-hydra-core>=1.1.0
+hydra-core
 transformers>=4.0.1
 sentencepiece<1.0.0
 webdataset
